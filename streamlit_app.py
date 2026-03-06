@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 
@@ -40,6 +40,11 @@ HELPER_ICON_BY_DETECTED_AGENT = {
     "technik": ASSETS_DIR / "DBTechnik.png",
     "bistro": ASSETS_DIR / "DBBistro.png",
 }
+
+
+def is_identity_only_mode() -> bool:
+    value = os.getenv("DB_IDENTITY_ONLY", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def require_env(name: str) -> str:
@@ -258,7 +263,11 @@ def resolve_helper_agent(handover: dict, project_client: AIProjectClient) -> tup
         return None
 
     helper_name, helper_version = helper
-    resolved_version = helper_version or get_latest_agent_version(project_client, helper_name)
+    cache = st.session_state.setdefault("helper_agent_version_cache", {})
+    resolved_version = helper_version or cache.get(helper_name)
+    if not resolved_version:
+        resolved_version = get_latest_agent_version(project_client, helper_name)
+        cache[helper_name] = resolved_version
     return helper_name, resolved_version, detected
 
 
@@ -281,14 +290,11 @@ def get_icon_path_for_detected_agent(detected_agent: str) -> str | None:
 
 
 def get_azure_credential():
-    # In App Service, prefer managed identity directly for deterministic auth behavior.
-    if os.getenv("WEBSITE_SITE_NAME"):
-        client_id = os.getenv("AZURE_CLIENT_ID")
-        if client_id:
-            return ManagedIdentityCredential(client_id=client_id)
-        return ManagedIdentityCredential()
+    # Identity-only mode: prefer developer/user credentials and skip managed identity.
+    if is_identity_only_mode():
+        return DefaultAzureCredential(exclude_managed_identity_credential=True)
 
-    # Local development can continue using chained credentials.
+    # Fallback mode uses the full default chain, including managed identity when available.
     return DefaultAzureCredential()
 
 
@@ -300,6 +306,30 @@ def get_clients() -> tuple[AIProjectClient, object]:
         st.session_state.project_client = project_client
         st.session_state.openai_client = openai_client
     return st.session_state.project_client, st.session_state.openai_client
+
+
+def get_runtime_agents(project_client: AIProjectClient) -> dict[str, str]:
+    runtime_agents = st.session_state.get("runtime_agents")
+    if runtime_agents:
+        return runtime_agents
+
+    orchestrator_agent_name = require_env("DB_ORCHESTRATOR_AGENT_NAME")
+    orchestrator_agent_version = os.getenv("DB_ORCHESTRATOR_AGENT_VERSION") or get_latest_agent_version(
+        project_client, orchestrator_agent_name
+    )
+    service_agent_name = require_env("DB_SERVICE_AGENT_NAME")
+    service_agent_version = os.getenv("DB_SERVICE_AGENT_VERSION") or get_latest_agent_version(
+        project_client, service_agent_name
+    )
+
+    runtime_agents = {
+        "orchestrator_name": orchestrator_agent_name,
+        "orchestrator_version": orchestrator_agent_version,
+        "service_name": service_agent_name,
+        "service_version": service_agent_version,
+    }
+    st.session_state.runtime_agents = runtime_agents
+    return runtime_agents
 
 
 def build_attachment_context(uploaded_file) -> tuple[str, str]:
@@ -378,6 +408,12 @@ def _extract_completion_text(completion) -> str:
 def analyze_attachment_with_tool(uploaded_file, concern: str) -> dict | None:
     if uploaded_file is None:
         return None
+
+    if is_identity_only_mode():
+        return {
+            "tool_used": False,
+            "error": "Image analysis tool is disabled in identity-only mode.",
+        }
 
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -548,19 +584,12 @@ def main() -> None:
         process_status.write("DBService is analyzing and routing your concern")
 
         project_client, openai_client = get_clients()
-        orchestrator_agent_name = require_env("DB_ORCHESTRATOR_AGENT_NAME")
-        orchestrator_agent_version = os.getenv("DB_ORCHESTRATOR_AGENT_VERSION") or get_latest_agent_version(
-            project_client, orchestrator_agent_name
-        )
-        service_agent_name = require_env("DB_SERVICE_AGENT_NAME")
-        service_agent_version = os.getenv("DB_SERVICE_AGENT_VERSION") or get_latest_agent_version(
-            project_client, service_agent_name
-        )
+        runtime_agents = get_runtime_agents(project_client)
 
         orchestrator_response = run_agent_with_retry(
             openai_client,
-            agent_name=orchestrator_agent_name,
-            agent_version=orchestrator_agent_version,
+            agent_name=runtime_agents["orchestrator_name"],
+            agent_version=runtime_agents["orchestrator_version"],
             user_message=concern_with_attachment,
         )
         process_status.write("Routing step completed")
@@ -628,8 +657,8 @@ def main() -> None:
         )
         service_response = run_agent_with_retry(
             openai_client,
-            agent_name=service_agent_name,
-            agent_version=service_agent_version,
+            agent_name=runtime_agents["service_name"],
+            agent_version=runtime_agents["service_version"],
             user_message=service_input,
         )
         process_status.write("DBService is finalizing user response")
