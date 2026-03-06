@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from dotenv import load_dotenv
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 
@@ -280,10 +280,22 @@ def get_icon_path_for_detected_agent(detected_agent: str) -> str | None:
     return str(icon_path)
 
 
+def get_azure_credential():
+    # In App Service, prefer managed identity directly for deterministic auth behavior.
+    if os.getenv("WEBSITE_SITE_NAME"):
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        if client_id:
+            return ManagedIdentityCredential(client_id=client_id)
+        return ManagedIdentityCredential()
+
+    # Local development can continue using chained credentials.
+    return DefaultAzureCredential()
+
+
 def get_clients() -> tuple[AIProjectClient, object]:
     if "project_client" not in st.session_state or "openai_client" not in st.session_state:
         endpoint = require_env("AZURE_AI_PROJECT_ENDPOINT")
-        project_client = AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential())
+        project_client = AIProjectClient(endpoint=endpoint, credential=get_azure_credential())
         openai_client = project_client.get_openai_client()
         st.session_state.project_client = project_client
         st.session_state.openai_client = openai_client
