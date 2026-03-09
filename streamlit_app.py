@@ -562,13 +562,13 @@ def main() -> None:
 
     render_history()
 
-    st.caption("Tip: Click the upload icon in the chat box to attach a JPG, JPEG, or PNG.")
-
     chat_value = st.chat_input(
         "Describe your concern...",
         accept_file=True,
         file_type=["jpg", "jpeg", "png"],
     )
+    st.caption("Tip: Click the upload icon in the chat box to attach a JPG, JPEG, or PNG.")
+
     concern, uploaded_file = parse_chat_input_value(chat_value)
 
     if not concern and uploaded_file is None:
@@ -634,28 +634,32 @@ def main() -> None:
 
         process_status.write("Resolving helper agent assignment")
         helper_agent = resolve_helper_agent(handover_payload, project_client)
-        if not helper_agent:
-            return
+        helper_name = None
+        helper_response = ""
+        detected_agent = None
 
-        helper_name, helper_version, detected_agent = helper_agent
-        st.session_state.active_agent = detected_agent
-        with board_placeholder.container():
-            render_agent_board(st.session_state.active_agent, f"{AGENT_NAME_BY_KEY[detected_agent]} is handling details")
-        process_status.write(f"{AGENT_NAME_BY_KEY[detected_agent]} is processing helper task")
+        if helper_agent:
+            helper_name, helper_version, detected_agent = helper_agent
+            st.session_state.active_agent = detected_agent
+            with board_placeholder.container():
+                render_agent_board(st.session_state.active_agent, f"{AGENT_NAME_BY_KEY[detected_agent]} is handling details")
+            process_status.write(f"{AGENT_NAME_BY_KEY[detected_agent]} is processing helper task")
 
-        helper_input = (
-            "DBService handoff payload:\n"
-            f"{json.dumps(handover_payload, ensure_ascii=False)}\n\n"
-            "Attachment tool result:\n"
-            f"{json.dumps(tool_result, ensure_ascii=False)}"
-        )
-        helper_response = run_agent_with_retry(
-            openai_client,
-            agent_name=helper_name,
-            agent_version=helper_version,
-            user_message=helper_input,
-        )
-        process_status.write("Helper response received")
+            helper_input = (
+                "DBService handoff payload:\n"
+                f"{json.dumps(handover_payload, ensure_ascii=False)}\n\n"
+                "Attachment tool result:\n"
+                f"{json.dumps(tool_result, ensure_ascii=False)}"
+            )
+            helper_response = run_agent_with_retry(
+                openai_client,
+                agent_name=helper_name,
+                agent_version=helper_version,
+                user_message=helper_input,
+            )
+            process_status.write("Helper response received")
+        else:
+            process_status.write("No helper match found. DBService will answer directly")
 
         service_input = (
             "User concern:\n"
@@ -686,12 +690,13 @@ def main() -> None:
         with st.chat_message("assistant", avatar=dbservice_avatar):
             st.markdown(f"**DBService**\n\n{service_text}")
 
-        avatar = get_icon_path_for_detected_agent(detected_agent)
-        helper_title = detected_agent.capitalize()
-        helper_text = f"**{helper_title} ({helper_name})**\n\n{helper_response}"
-        add_message("assistant", helper_text, avatar=avatar)
-        with st.chat_message("assistant", avatar=avatar):
-            st.markdown(helper_text)
+        if helper_name and detected_agent:
+            avatar = get_icon_path_for_detected_agent(detected_agent)
+            helper_title = detected_agent.capitalize()
+            helper_text = f"**{helper_title} ({helper_name})**\n\n{helper_response}"
+            add_message("assistant", helper_text, avatar=avatar)
+            with st.chat_message("assistant", avatar=avatar):
+                st.markdown(helper_text)
 
         process_status.update(label="Completed", state="complete", expanded=False)
 
