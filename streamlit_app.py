@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from base64 import b64encode
 from pathlib import Path
 
@@ -58,21 +59,41 @@ def run_agent_with_retry(
     openai_client,
     *,
     agent_name: str,
-    agent_version: str,
+    agent_version: str | None,
     user_message: str,
     max_retries: int = 2,
 ) -> str:
-    response = openai_client.responses.create(
-        input=[{"role": "user", "content": user_message}],
-        extra_body={
-            "agent_reference": {
+    timeout_seconds = float(os.getenv("DB_AGENT_TIMEOUT_SECONDS", "45"))
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            agent_reference: dict[str, str] = {
                 "type": "agent_reference",
                 "name": agent_name,
-                "version": agent_version,
             }
-        },
-    )
-    return response.output_text
+            if agent_version:
+                agent_reference["version"] = agent_version
+
+            response = openai_client.responses.create(
+                input=[{"role": "user", "content": user_message}],
+                extra_body={"agent_reference": agent_reference},
+                timeout=timeout_seconds,
+            )
+            return response.output_text
+        except Exception as error:
+            last_error = error
+            is_retryable = any(
+                marker in str(error).lower()
+                for marker in ["timed out", "timeout", "connect", "transient", "429", "503", "504"]
+            )
+            if attempt == max_retries or not is_retryable:
+                raise
+            time.sleep(attempt + 1)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Agent call failed without an explicit error")
 
 
 def image_to_data_uri(path: Path | None) -> str | None:
@@ -249,7 +270,7 @@ def extract_handover_json(text: str) -> dict | None:
     return None
 
 
-def resolve_helper_agent(handover: dict, project_client: AIProjectClient) -> tuple[str, str, str] | None:
+def resolve_helper_agent(handover: dict, project_client: AIProjectClient) -> tuple[str, str | None, str] | None:
     detected = str(handover.get("detected_agent", "")).lower()
     mapping: dict[str, tuple[str, str | None]] = {
         "reinigung": (require_env("DB_CLEANING_AGENT_NAME"), os.getenv("DB_CLEANING_AGENT_VERSION")),
@@ -263,12 +284,7 @@ def resolve_helper_agent(handover: dict, project_client: AIProjectClient) -> tup
         return None
 
     helper_name, helper_version = helper
-    cache = st.session_state.setdefault("helper_agent_version_cache", {})
-    resolved_version = helper_version or cache.get(helper_name)
-    if not resolved_version:
-        resolved_version = get_latest_agent_version(project_client, helper_name)
-        cache[helper_name] = resolved_version
-    return helper_name, resolved_version, detected
+    return helper_name, helper_version, detected
 
 
 def get_icon_path(path: Path) -> str | None:
@@ -308,19 +324,15 @@ def get_clients() -> tuple[AIProjectClient, object]:
     return st.session_state.project_client, st.session_state.openai_client
 
 
-def get_runtime_agents(project_client: AIProjectClient) -> dict[str, str]:
+def get_runtime_agents(project_client: AIProjectClient) -> dict[str, str | None]:
     runtime_agents = st.session_state.get("runtime_agents")
     if runtime_agents:
         return runtime_agents
 
     orchestrator_agent_name = require_env("DB_ORCHESTRATOR_AGENT_NAME")
-    orchestrator_agent_version = os.getenv("DB_ORCHESTRATOR_AGENT_VERSION") or get_latest_agent_version(
-        project_client, orchestrator_agent_name
-    )
+    orchestrator_agent_version = os.getenv("DB_ORCHESTRATOR_AGENT_VERSION")
     service_agent_name = require_env("DB_SERVICE_AGENT_NAME")
-    service_agent_version = os.getenv("DB_SERVICE_AGENT_VERSION") or get_latest_agent_version(
-        project_client, service_agent_name
-    )
+    service_agent_version = os.getenv("DB_SERVICE_AGENT_VERSION")
 
     runtime_agents = {
         "orchestrator_name": orchestrator_agent_name,
@@ -620,6 +632,7 @@ def main() -> None:
             ):
                 handover_payload["detected_agent"] = suggested_agent
 
+        process_status.write("Resolving helper agent assignment")
         helper_agent = resolve_helper_agent(handover_payload, project_client)
         if not helper_agent:
             return
