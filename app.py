@@ -44,10 +44,9 @@ def run_agent_with_retry(
             response = openai_client.responses.create(
                 input=[{"role": "user", "content": user_message}],
                 extra_body={
-                    "agent": {
+                    "agent_reference": {
                         "name": agent_name,
                         "version": agent_version,
-                        "type": "agent_reference",
                     }
                 },
             )

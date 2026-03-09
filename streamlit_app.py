@@ -43,7 +43,7 @@ HELPER_ICON_BY_DETECTED_AGENT = {
 
 
 def is_identity_only_mode() -> bool:
-    value = os.getenv("DB_IDENTITY_ONLY", "true").strip().lower()
+    value = os.getenv("DB_IDENTITY_ONLY", "false").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
@@ -65,10 +65,9 @@ def run_agent_with_retry(
     response = openai_client.responses.create(
         input=[{"role": "user", "content": user_message}],
         extra_body={
-            "agent": {
+            "agent_reference": {
                 "name": agent_name,
                 "version": agent_version,
-                "type": "agent_reference",
             }
         },
     )
