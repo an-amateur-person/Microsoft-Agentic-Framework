@@ -66,6 +66,7 @@ def run_agent_with_retry(
         input=[{"role": "user", "content": user_message}],
         extra_body={
             "agent_reference": {
+                "type": "agent_reference",
                 "name": agent_name,
                 "version": agent_version,
             }
